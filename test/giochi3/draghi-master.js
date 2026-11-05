@@ -1,0 +1,196 @@
+// DRAGHI E SEGRETE, il master umano: si sceglie al tavolo (non crea un personaggio), le richieste aspettano lui, la
+// sua risposta (racconto, prove, eventi, combattimento) la applica il gioco, l'IA gli fa da consigliere, scrive una
+// bozza, risponde al posto suo o fa tutto in automatico; se il master è via risponde l'IA; i giocatori non vedono le
+// sue cose; anche nelle ambientazioni horror (vede tutta la stazione).
+const assert = require('assert');
+const G = require('../../giochi3/draghi');
+
+const aspetta = () => new Promise((r) => setImmediate(r));
+async function finoA(g, cond, n = 40) { for (let k = 0; k < n && !cond(); k++) { await aspetta(); g.controllaTempo(); } }
+
+(async () => {
+  const t0 = Date.now();
+  const g = G.crea({ n: 3, bot: [null, null, 'medio'], opzioni: {} });
+  g.chiave = ''; // niente Gemini: consiglieri e bozze dal master di riserva
+  // la scelta del master: chi ha aperto il tavolo sceglie, il computer no
+  assert.ok(g.azione(1, { tipo: 'dm-scegli', posto: 0 }).errore, 'solo chi ha aperto il tavolo sceglie un altro');
+  assert.ok(g.azione(0, { tipo: 'dm-scegli', posto: 2 }).errore, 'il computer non fa il master');
+  assert.ok(!g.azione(0, { tipo: 'dm-scegli', posto: 1 }).errore);
+  assert.strictEqual(g.dm, 1);
+  assert.ok(g.azione(1, { tipo: 'crea', casuale: true, scelte: {} }).errore, 'il master non crea il personaggio');
+  assert.ok(!g.attesiTutti().includes(1), 'nella creazione non si aspetta il master');
+  assert.ok(!g.azione(1, { tipo: 'idea', testo: 'un faro maledetto' }).errore, 'il master scrive l\'idea');
+  g.azione(0, { tipo: 'crea', casuale: true, scelte: {} });
+  assert.strictEqual(g.fase, 'creazione');
+  assert.ok(!g.azione(1, { tipo: 'inizia' }).errore, 'il master può far partire');
+  assert.strictEqual(g.fase, 'avventura');
+  assert.ok(g.pg[0] && g.pg[2] && !g.pg[1], 'personaggi per tutti tranne il master');
+  // l'inizio aspetta il master, non l'IA
+  assert.ok(g.attesaIA && g.attesaDM, 'la prima scena la racconta il master');
+  assert.deepStrictEqual(g.attesi(), [1], 'il server aspetta il master');
+  assert.ok(g.vista(1).dmInfo.richiesta.testo.includes('un faro maledetto'), 'il master vede la richiesta');
+  assert.strictEqual(g.vista(0).dmInfo, null, 'i giocatori non vedono le cose del master');
+  assert.ok(g.vista(0).attesaIA, 'i giocatori vedono che il master sta pensando');
+  assert.ok(g.azione(0, { tipo: 'dm-rispondi', risposta: { narrazione: 'x' } }).errore, 'solo il master risponde');
+  assert.ok(g.azione(1, { tipo: 'dm-rispondi', risposta: {} }).errore, 'una risposta vuota non va');
+  // il consigliere (senza IA: consigli scritti a mano) e la bozza
+  assert.ok(!g.azione(1, { tipo: 'dm-chiedi', testo: 'che CD do per scassinare?' }).errore);
+  await finoA(g, () => !g.attesaConsiglio);
+  assert.strictEqual(g.consigli.length, 2); assert.ok(/CD/.test(g.consigli[1].testo), 'il consigliere risponde');
+  assert.ok(!g.azione(1, { tipo: 'dm-bozza' }).errore);
+  await finoA(g, () => !g.attesaBozza);
+  assert.ok(g.vista(1).dmInfo.bozza && g.vista(1).dmInfo.bozza.r.narrazione, 'la bozza dell\'IA arriva al master');
+  assert.ok(g.attesaDM, 'la bozza non risponde da sola');
+  // ✨ riscrivi con l'IA: senza IA il testo resta del master, solo sistemato; non si manda da solo
+  assert.ok(g.azione(1, { tipo: 'dm-riscrivi', testo: '  ' }).errore, 'serve un testo da riscrivere');
+  assert.ok(g.azione(0, { tipo: 'dm-riscrivi', testo: 'x' }).errore, 'solo il master');
+  const nRacc = g.racconto.length;
+  assert.ok(!g.azione(1, { tipo: 'dm-riscrivi', campo: 'dmNarr', testo: 'arriva un orco  ,vi guarda male.dice dammi i soldi' }).errore);
+  assert.ok(g.azione(1, { tipo: 'dm-riscrivi', testo: 'altro' }).errore, 'una riscrittura alla volta');
+  await finoA(g, () => !g.attesaRiscrittura);
+  let rs = g.vista(1).dmInfo.riscrittura;
+  assert.strictEqual(rs.campo, 'dmNarr'); assert.ok(rs.riserva);
+  assert.strictEqual(rs.testo, 'Arriva un orco, vi guarda male. Dice dammi i soldi.');
+  assert.strictEqual(g.racconto.length, nRacc, 'la riscrittura non va nel racconto finché il master non la manda');
+  assert.ok(g.attesaDM, 'i giocatori aspettano ancora il master');
+  assert.strictEqual(g.vista(0).dmInfo, null, 'i giocatori non vedono la riscrittura');
+  // con l'IA (Gemini finto): il testo grossolano diventa racconto, senza markdown né presentazione
+  const chiesti = [];
+  g.chiave = 'finta';
+  g.fetch = async (_u, o) => { chiesti.push(JSON.parse(o.body)); return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: 'Ecco il racconto:\n**Un orco** enorme sbuca dalla nebbia e vi squadra. «Datemi i vostri soldi» ringhia.' }] } }] }) }; };
+  g.azione(1, { tipo: 'dm-riscrivi', campo: 'dmLNarr', testo: 'orco arriva vuole soldi' });
+  await finoA(g, () => !g.attesaRiscrittura);
+  rs = g.vista(1).dmInfo.riscrittura;
+  assert.strictEqual(rs.campo, 'dmLNarr');
+  assert.strictEqual(rs.testo, 'Un orco enorme sbuca dalla nebbia e vi squadra. «Datemi i vostri soldi» ringhia.');
+  assert.ok(/orco arriva vuole soldi/.test(chiesti[0].contents[0].parts[0].text) && /RISCRIVI/.test(chiesti[0].systemInstruction.parts[0].text), 'a Gemini va il testo del master con le istruzioni del narratore');
+  assert.ok(!chiesti[0].generationConfig.responseMimeType, 'risposta in testo, non JSON');
+  g.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  g.azione(1, { tipo: 'dm-riscrivi', campo: 'boh', testo: 'altro' });
+  await finoA(g, () => !g.attesaRiscrittura);
+  rs = g.vista(1).dmInfo.riscrittura;
+  assert.ok(rs.errore && !rs.testo && rs.campo === 'dmNarr', 'se l\'IA non risponde il master lo sa (e il campo sconosciuto diventa il racconto)');
+  g.chiave = ''; g.fetch = null;
+  // la risposta del master: racconto, evento e una prova
+  const nome = g.pg[0].nome;
+  assert.ok(!g.azione(1, { tipo: 'dm-rispondi', risposta: { narrazione: 'Il faro è buio.', eventi: [{ tipo: 'oro', chi: nome, quantita: 7 }], prove: [{ chi: nome, tipo: 'percezione', cd: 12 }], scelte: ['Salire', 'Scendere'] } }).errore);
+  assert.ok(!g.attesaIA && !g.attesaDM);
+  assert.ok(g.racconto.some((v) => v.tipo === 'master' && v.testo === 'Il faro è buio.'), 'il racconto del master');
+  assert.strictEqual(g.fase, 'prove'); assert.deepStrictEqual(g.scelte, ['Salire', 'Scendere']);
+  g.azione(0, { tipo: 'tira' });
+  await finoA(g, () => g.prove.every((x) => x.esito));
+  assert.ok(g.attesaDM && g.attesaDM.tipo === 'esiti', 'gli esiti tornano al master');
+  // "fai rispondere l'IA" una volta
+  assert.ok(!g.azione(1, { tipo: 'dm-ia' }).errore);
+  await finoA(g, () => !g.attesaIA);
+  assert.ok(!g.attesaDM && !g.attesaIA, 'ha risposto l\'IA (di riserva)');
+  // (il master di riserva a volte fa partire uno scontro o chiede una prova: qui si torna al racconto)
+  g.combattimento = null; g.prove = []; g.fase = 'avventura';
+  // le dichiarazioni dei giocatori vanno al master; il master può intervenire anche senza richiesta
+  assert.ok(!g.azione(1, { tipo: 'dm-narra', testo: 'Un tuono scuote le finestre.' }).errore);
+  g.azione(0, { tipo: 'dichiara', testo: 'salgo le scale' });
+  await finoA(g, () => g.attesaDM);
+  assert.ok(g.attesaDM && /salgo le scale/.test(g.attesaDM.richiesta));
+  // un combattimento deciso dal master: il racconto dei round non lo fa l'IA, le azioni libere le giudica il master
+  g.azione(1, { tipo: 'dm-rispondi', risposta: { narrazione: 'Goblin!', combattimento: { nemici: [{ id: 'goblin', n: 2 }], scena: 'dungeon' } } });
+  assert.strictEqual(g.fase, 'combattimento');
+  const c = g.creaturaDi(0); c.turno = { ...(c.turno || { bonus: true, movimento: 9, attacchi: 0, attacchiMax: 1 }), azione: true }; g.combattimento.indice = g.combattimento.ordine.indexOf(c.id);
+  assert.ok(!g.azione(0, { tipo: 'libera', testo: 'lancio la lanterna sul goblin' }).errore);
+  assert.ok(g.liberaDM && g.attesiTutti().includes(1), 'l\'azione libera aspetta il master');
+  assert.strictEqual(g.vista(1).dmInfo.libera.testo, 'lancio la lanterna sul goblin');
+  const gob = g.combattimento.creature.find((x) => x.lato === 'nemici');
+  const pf = gob.ref.pf;
+  assert.ok(!g.azione(1, { tipo: 'dm-libera', esito: { narrazione: 'La lanterna esplode.', effetti: [{ bersaglio: gob.ref.nome, danno: '3', tipoDanno: 'fuoco' }] } }).errore);
+  assert.ok(gob.ref.pf < pf || gob.ref.morto, 'l\'effetto deciso dal master si applica');
+  assert.ok(!g.liberaDM && !g.attesaLibera);
+  // il master muove i nemici: al turno di un goblin il gioco aspetta lui, poi muove, attacca e passa con le regole
+  {
+    const cb = g.combattimento, gob2 = cb.creature.find((x) => x.lato === 'nemici' && cb.vivo(x));
+    assert.ok(g.dmNemici, 'di base i nemici li muove il master');
+    assert.ok(g.azione(0, { tipo: 'dm-cb', mossa: 'fine' }).errore, 'solo il master muove i nemici');
+    if (cb.attivo.lato !== 'nemici') { cb.fineTurno(cb.attivo.id); }
+    cb.indice = cb.ordine.indexOf(gob2.id); cb.iniziaTurno();
+    const pf0 = cb.creature.filter((x) => x.lato === 'gruppo').map((x) => x.ref.pf).join();
+    g.prossimaMossaMostro = 0; g.controllaTempo(); g.controllaTempo();
+    assert.strictEqual(cb.attivo, gob2, 'il gioco non muove il goblin da solo');
+    assert.strictEqual(cb.creature.filter((x) => x.lato === 'gruppo').map((x) => x.ref.pf).join(), pf0);
+    assert.ok(g.attesi().includes(1), 'si aspetta il master');
+    const m = g.vista(1).dmInfo.mano;
+    assert.ok(m && m.id === gob2.id && m.attacchi.length, 'il master vede il nemico da muovere con i suoi attacchi');
+    assert.strictEqual(g.vista(0).dmInfo, null);
+    // un passo verso il personaggio, poi un attacco se ci arriva, poi fine turno
+    const pg0 = g.creaturaDi(0);
+    const passi = cb.raggiungibili(gob2), w = cb.scena.w;
+    let meglio = null; for (let i = 0; i < passi.costo.length; i++) if (passi.costo[i] !== Infinity && passi.costo[i] > 0 && !cb.occupata(i % w, Math.floor(i / w), gob2)) { const q = { x: i % w, y: Math.floor(i / w) }; if (!meglio || cb.dist(q, pg0) < cb.dist(meglio, pg0)) meglio = q; }
+    if (meglio) { assert.ok(!g.azione(1, { tipo: 'dm-cb', mossa: 'muovi', x: meglio.x, y: meglio.y }).errore); assert.deepStrictEqual([gob2.x, gob2.y], [meglio.x, meglio.y]); }
+    assert.ok(g.azione(1, { tipo: 'dm-cb', mossa: 'muovi', x: -1, y: 0 }).errore, 'fuori dalla mappa no');
+    if (cb.dist(gob2, pg0) <= 1.5) { assert.ok(!g.azione(1, { tipo: 'dm-cb', mossa: 'attacca', bersaglio: pg0.id }).errore); assert.ok(!gob2.turno.azione || gob2.turno.attacchi > 0, 'l\'attacco usa l\'azione'); }
+    if (cb.attivo === gob2) assert.ok(!g.azione(1, { tipo: 'dm-cb', mossa: 'fine' }).errore);
+    assert.notStrictEqual(cb.attivo, gob2, 'il turno passa');
+    // dopo 2 minuti senza mosse il turno lo fa il gioco
+    const altro = cb.creature.find((x) => x.lato === 'nemici' && cb.vivo(x) && x !== gob2) || gob2;
+    cb.indice = cb.ordine.indexOf(altro.id); cb.iniziaTurno();
+    g.controllaTempo();
+    assert.strictEqual(cb.attivo, altro);
+    g.manoDa = Date.now() - 121000; g.controllaTempo();
+    assert.notStrictEqual(cb.attivo, altro, 'master via: lo muove il gioco');
+    // 🖐️ sposta a mano: dove vuole, in qualsiasi momento, ma solo i nemici e su caselle libere
+    const vivo = cb.creature.find((x) => x.lato === 'nemici' && cb.vivo(x));
+    let libera = null; for (let y = 0; y < cb.scena.h && !libera; y++) for (let x = 0; x < w && !libera; x++) if (require('../../giochi3/draghi/mappe').passabile(cb.scena.g[y * w + x]) && !cb.occupata(x, y) && cb.dist({ x, y }, vivo) > 6) libera = { x, y };
+    assert.ok(!g.azione(1, { tipo: 'dm-cb', mossa: 'sposta', id: vivo.id, ...libera }).errore);
+    assert.deepStrictEqual([vivo.x, vivo.y], [libera.x, libera.y], 'il nemico è dove l\'ha messo il master');
+    assert.ok(g.azione(1, { tipo: 'dm-cb', mossa: 'sposta', id: pg0.id, x: libera.x + 1, y: libera.y }).errore, 'i personaggi no');
+    assert.ok(g.azione(1, { tipo: 'dm-cb', mossa: 'sposta', id: vivo.id, x: pg0.x, y: pg0.y }).errore, 'non sopra qualcuno');
+    // «li muove il gioco»: il gioco torna a muovere i nemici
+    assert.ok(!g.azione(1, { tipo: 'dm-nemici', si: false }).errore);
+    assert.strictEqual(g.manoAttiva(), false); assert.strictEqual(g.vista(1).dmInfo.mano, null);
+    g.azione(1, { tipo: 'dm-nemici', si: true });
+  }
+  // il master è via: risponde l'IA (la mossa del computer per il master)
+  g.combattimento = null; g.fase = 'avventura';
+  g.chiediMaster('azioni', 'Cosa fanno i personaggi: niente');
+  assert.deepStrictEqual(G.bot(g, 1), { tipo: 'dm-ia' });
+  g.azione(1, G.bot(g, 1));
+  await finoA(g, () => !g.attesaIA);
+  assert.ok(!g.attesaDM);
+  // automatico: l'IA risponde da sola finché il master non riprende
+  g.azione(1, { tipo: 'dm-auto', si: true });
+  g.chiediMaster('azioni', 'Cosa fanno: niente');
+  assert.ok(!g.attesaDM, 'in automatico non si aspetta il master');
+  await finoA(g, () => !g.attesaIA);
+  g.azione(1, { tipo: 'dm-auto', si: false });
+  // il master lascia: torna l'IA, e il suo posto resta senza personaggio
+  g.chiediMaster('azioni', 'Cosa fanno: niente');
+  assert.ok(g.attesaDM);
+  assert.ok(!g.azione(0, { tipo: 'dm-lascia' }).errore, 'chi ha aperto il tavolo può ridare il master all\'IA');
+  assert.ok(g.dm == null && !g.attesaDM);
+  await finoA(g, () => !g.attesaIA);
+  // il master scelto nella sala d'attesa (server.js passa il suo posto)
+  const sala = G.crea({ n: 3, bot: [null, null, 'medio'], opzioni: {}, master: 1 });
+  assert.strictEqual(sala.dm, 1, 'il master della sala');
+  assert.strictEqual(G.crea({ n: 3, bot: [null, null, 'medio'], opzioni: {}, master: 2 }).dm, null, 'il computer no');
+  // non nello stesso computer né in tempo reale, e non da soli
+  const loc = G.crea({ n: 3, bot: [null, 'medio', null], opzioni: { stessoPc: 2 } });
+  assert.ok(loc.azione(0, { tipo: 'dm-scegli', posto: 1 }).errore, 'chi gioca sul computer passato non fa il master');
+  assert.ok(!loc.azione(0, { tipo: 'dm-scegli', posto: 2 }).errore, 'un amico col suo dispositivo sì');
+  assert.ok(G.crea({ n: 2, bot: [null, null], opzioni: { modalita: 'reale', ambientazione: 'sevastopol' } }).azione(0, { tipo: 'dm-scegli', posto: 1 }).errore);
+  assert.ok(G.crea({ n: 1, bot: [null], opzioni: {} }).azione(0, { tipo: 'dm-scegli', posto: 0 }).errore);
+  // horror a turni: il master vede tutta la stazione e i segreti della creatura
+  const h = G.crea({ n: 2, bot: [null, null], opzioni: { ambientazione: 'sevastopol' } });
+  h.chiave = '';
+  h.azione(1, { tipo: 'dm-scegli', posto: 1 });
+  h.azione(0, { tipo: 'crea', casuale: true, scelte: {} });
+  h.azione(0, { tipo: 'inizia' });
+  assert.strictEqual(h.fase, 'avventura'); assert.ok(h.attesaDM);
+  const vd = h.vista(1), vg = h.vista(0);
+  assert.strictEqual(vd.incubo.aree.length, h.cp.aree.length, 'il master vede tutti i settori');
+  assert.ok(vg.incubo.aree.length < h.cp.aree.length, 'i giocatori solo quelli scoperti');
+  assert.ok(/CREATURA/.test(vd.dmInfo.segreti) && vd.dmInfo.bestiario.length, 'segreti e bestiario dell\'ambientazione');
+  // gli eventi horror del master: un settore vicino (anche chiuso: decide lui), rumore, oggetti della stazione
+  const prima = h.incubo.area, dove = vd.incubo.strade[0].id;
+  h.azione(1, { tipo: 'dm-rispondi', risposta: { narrazione: 'Avanzate.', eventi: [{ tipo: 'vai', area: dove, forza: true }, { tipo: 'rumore', quantita: 2 }, { tipo: 'oggetto', chi: 'tutti', id: vd.dmInfo.oggettiTema[0].id, n: 1 }] } });
+  assert.ok(h.incubo.area === dove && dove !== prima, 'il gruppo cambia settore');
+  assert.ok(h.incubo.rumore >= 2, 'il rumore sale');
+  assert.ok(vd.dmInfo.chiaviTema.length, 'gli oggetti chiave della stazione');
+  console.log(`✓ Draghi e Segrete col master umano: scelta al tavolo, richieste che aspettano lui, consigliere, bozza, riscrittura con l'IA, IA al posto suo e in automatico, azioni libere, horror (${Date.now() - t0} ms)`);
+})().catch((e) => { console.error(e); process.exit(1); });
